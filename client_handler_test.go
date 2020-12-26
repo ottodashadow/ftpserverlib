@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/secsy/goftp"
 	"github.com/stretchr/testify/assert"
@@ -65,6 +66,8 @@ func TestTransferOpenError(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	// we send STOR without opening a transfer connection
 	rc, response, err := raw.SendCommand("STOR file")
 	require.NoError(t, err)
@@ -86,6 +89,8 @@ func TestTLSMethods(t *testing.T) {
 			Settings: &Settings{
 				TLSRequired: ImplicitEncryption,
 			},
+			TLS:   true,
+			Debug: true,
 		})
 		cc := clientHandler{
 			server: s,
@@ -93,6 +98,97 @@ func TestTLSMethods(t *testing.T) {
 		require.True(t, cc.HasTLSForControl())
 		require.True(t, cc.HasTLSForTransfers())
 	})
+}
+
+func TestCloseConnection(t *testing.T) {
+	driver := &TestServerDriver{
+		Debug: true,
+	}
+	s := NewTestServerWithDriver(t, driver)
+
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	ftpUpload(t, c, createTemporaryFile(t, 1024*1024), "file.bin")
+
+	require.Len(t, driver.GetClientsInfo(), 1)
+
+	err = c.Rename("file.bin", "delay-io.bin")
+	require.NoError(t, err)
+
+	raw, err := c.OpenRawConn()
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	require.Len(t, driver.GetClientsInfo(), 2)
+
+	err = driver.DisconnectClient()
+	require.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return len(driver.GetClientsInfo()) == 1
+	}, 1*time.Second, 50*time.Millisecond)
+
+	err = driver.DisconnectClient()
+	require.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return len(driver.GetClientsInfo()) == 0
+	}, 1*time.Second, 50*time.Millisecond)
+}
+
+func TestClientContextConcurrency(t *testing.T) {
+	driver := &TestServerDriver{}
+	s := NewTestServerWithDriver(t, driver)
+
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	done := make(chan bool, 1)
+	connected := make(chan bool, 1)
+
+	go func() {
+		_, err := c.Getwd()
+		assert.NoError(t, err)
+		connected <- true
+
+		counter := 0
+
+		for counter < 100 {
+			_, err := c.Getwd()
+			assert.NoError(t, err)
+			counter++
+		}
+
+		done <- true
+	}()
+
+	<-connected
+
+	isDone := false
+	for !isDone {
+		info := driver.GetClientsInfo()
+		assert.Len(t, info, 1)
+
+		select {
+		case <-done:
+			isDone = true
+		default:
+		}
+	}
 }
 
 type multilineMessage struct {
@@ -156,7 +252,7 @@ func isStringInSlice(s string, list []string) bool {
 	return false
 }
 
-func TestUnkowCommand(t *testing.T) {
+func TestUnknownCommand(t *testing.T) {
 	s := NewTestServer(t, true)
 	conf := goftp.Config{
 		User:     authUser,
@@ -171,8 +267,11 @@ func TestUnkowCommand(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
-	rc, response, err := raw.SendCommand("UNSUPPORTED")
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	cmd := "UNSUPPORTED"
+	rc, response, err := raw.SendCommand(cmd)
 	require.NoError(t, err)
 	require.Equal(t, StatusSyntaxErrorNotRecognised, rc)
-	require.Equal(t, "Unknown command", response)
+	require.Equal(t, fmt.Sprintf("Unknown command %#v", cmd), response)
 }

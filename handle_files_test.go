@@ -97,6 +97,8 @@ func TestALLO(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	// Asking for too much (2MB)
 	rc, _, err := raw.SendCommand("ALLO 2000000")
 	require.NoError(t, err)
@@ -106,6 +108,11 @@ func TestALLO(t *testing.T) {
 	rc, _, err = raw.SendCommand("ALLO 500000")
 	require.NoError(t, err)
 	require.Equal(t, StatusOK, rc, "Should have been accepted")
+
+	// Wrong size
+	rc, _, err = raw.SendCommand("ALLO 500000a")
+	require.NoError(t, err)
+	require.Equal(t, StatusSyntaxErrorParameters, rc, "Should have been refused")
 }
 
 func TestCHMOD(t *testing.T) {
@@ -130,6 +137,8 @@ func TestCHMOD(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	rc, _, err := raw.SendCommand("SITE CHMOD a file")
 	require.NoError(t, err)
@@ -156,6 +165,8 @@ func TestCHOWN(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	// Asking for a chown user change that isn't authorized
 	rc, _, err := raw.SendCommand("SITE CHOWN 1001:500 file")
@@ -213,6 +224,8 @@ func TestMFMT(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	// Good
 	rc, _, err := raw.SendCommand("MFMT 20201209211059 file")
 	require.NoError(t, err)
@@ -255,6 +268,8 @@ func TestSYMLINK(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	// Bad syntaxes
 	rc, _, err := raw.SendCommand("SITE SYMLINK")
@@ -322,6 +337,8 @@ func TestSTATFile(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	rc, _, err := raw.SendCommand("STAT file")
 	require.NoError(t, err)
 	require.Equal(t, StatusFileStatus, rc)
@@ -353,6 +370,8 @@ func TestMDTM(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	rc, _, err := raw.SendCommand("MDTM file")
 	require.NoError(t, err)
 	require.Equal(t, StatusFileStatus, rc)
@@ -360,6 +379,54 @@ func TestMDTM(t *testing.T) {
 	rc, _, err = raw.SendCommand("MDTM missing")
 	require.NoError(t, err)
 	require.Equal(t, StatusActionNotTaken, rc)
+}
+
+func TestRename(t *testing.T) {
+	s := NewTestServer(t, true)
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	ftpUpload(t, c, createTemporaryFile(t, 10), "file")
+
+	err = c.Rename("file", "file1")
+	require.NoError(t, err)
+
+	raw, err := c.OpenRawConn()
+	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	rc, _, err := raw.SendCommand("RNTO file2")
+	require.NoError(t, err)
+	require.Equal(t, StatusBadCommandSequence, rc)
+}
+
+func TestHASHDisabled(t *testing.T) {
+	s := NewTestServer(t, true)
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	raw, err := c.OpenRawConn()
+	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	rc, message, err := raw.SendCommand("XSHA256 file.txt")
+	require.NoError(t, err)
+	require.Equal(t, StatusCommandNotImplemented, rc, message)
 }
 
 func TestHASHCommand(t *testing.T) {
@@ -398,6 +465,8 @@ func TestHASHCommand(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	// ask hash for a directory
 	rc, _, err := raw.SendCommand(fmt.Sprintf("XSHA256 %v", dir))
 	require.NoError(t, err)
@@ -423,6 +492,7 @@ func TestHASHCommand(t *testing.T) {
 
 func TestCustomHASHCommands(t *testing.T) {
 	s := NewTestServer(t, true)
+	s.settings.EnableHASH = true
 	conf := goftp.Config{
 		User:     authUser,
 		Password: authPass,
@@ -435,30 +505,25 @@ func TestCustomHASHCommands(t *testing.T) {
 
 	tempFile, err := ioutil.TempFile("", "ftpserver")
 	require.NoError(t, err)
-	err = ioutil.WriteFile(tempFile.Name(), []byte("sample data with know checksum/hash\n"), os.ModePerm)
+	_, err = tempFile.Write([]byte("sample data with know checksum/hash\n"))
 	require.NoError(t, err)
 
 	ftpUpload(t, c, tempFile, "file.txt")
 
+	err = tempFile.Close()
+	require.NoError(t, err)
+
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
-	rc, message, err := raw.SendCommand("XSHA256 file.txt")
-	require.NoError(t, err)
-	require.Equal(t, StatusCommandNotImplemented, rc, message)
+	defer func() { require.NoError(t, raw.Close()) }()
 
-	s.settings.EnableHASH = true
+	hashMapping := getKnownHASHMappings()
 
-	customCommands := make(map[string]string)
-	customCommands["XCRC"] = "21b0f382"
-	customCommands["MD5"] = "6905e38270e1797e68f69026bfbef131"
-	customCommands["XMD5"] = "6905e38270e1797e68f69026bfbef131"
-	customCommands["XSHA"] = "0f11c4103a2573b14edd4733984729f2380d99ed"
-	customCommands["XSHA1"] = "0f11c4103a2573b14edd4733984729f2380d99ed"
-	customCommands["XSHA256"] = "ceee704dd96e2b8c2ceca59c4c697bc01123fb9e66a1a3ac34dbdd2d6da9659b"
-	customCommands["XSHA512"] = "4f95c20e4d030cbc43b1e139a0fe11c5e0e5e520cf3265bae852ae212b1c7cdb02c2fea5ba038cbf3202af8cdf313579fbe344d47919c288c16d6dd671e9db63" //nolint:lll
+	var rc int
+	var message string
 
-	for cmd, expected := range customCommands {
+	for cmd, expected := range hashMapping {
 		rc, message, err = raw.SendCommand(fmt.Sprintf("%v file.txt", cmd))
 		require.NoError(t, err)
 		require.Equal(t, StatusFileOK, rc)
@@ -496,6 +561,8 @@ func TestCOMB(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	rc, message, err := raw.SendCommand("COMB file.bin 1 2")
 	require.NoError(t, err)
@@ -583,6 +650,8 @@ func TestCOMBAppend(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	rc, message, err := raw.SendCommand("COMB file.bin \" 0 \" \" 1 \"")
 	require.NoError(t, err)
 	require.Equal(t, StatusFileOK, rc, message)
@@ -601,6 +670,79 @@ func TestCOMBAppend(t *testing.T) {
 	require.Len(t, contents, 1)
 }
 
+func TestREST(t *testing.T) {
+	s := NewTestServer(t, true)
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	raw, err := c.OpenRawConn()
+	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	rc, response, err := raw.SendCommand("TYPE A")
+	require.NoError(t, err)
+	require.Equal(t, StatusOK, rc, response)
+
+	rc, response, err = raw.SendCommand("REST 10")
+	require.NoError(t, err)
+	require.Equal(t, StatusSyntaxErrorParameters, rc, response)
+
+	rc, response, err = raw.SendCommand("TYPE I")
+	require.NoError(t, err)
+	require.Equal(t, StatusOK, rc, response)
+
+	rc, response, err = raw.SendCommand("REST a")
+	require.NoError(t, err)
+	require.Equal(t, StatusActionNotTaken, rc, response)
+	require.True(t, strings.HasPrefix(response, "Couldn't parse size"))
+}
+
+func TestSIZE(t *testing.T) {
+	s := NewTestServer(t, true)
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+	}
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	raw, err := c.OpenRawConn()
+	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
+
+	rc, response, err := raw.SendCommand("SIZE file.bin")
+	require.NoError(t, err)
+	require.Equal(t, StatusActionNotTaken, rc, response)
+	require.True(t, strings.HasPrefix(response, "Couldn't access"))
+
+	ftpUpload(t, c, createTemporaryFile(t, 10), "file.bin")
+
+	rc, response, err = raw.SendCommand("SIZE file.bin")
+	require.NoError(t, err)
+	require.Equal(t, StatusFileStatus, rc, response)
+	require.Equal(t, "10", response)
+
+	rc, response, err = raw.SendCommand("TYPE A")
+	require.NoError(t, err)
+	require.Equal(t, StatusOK, rc, response)
+
+	rc, response, err = raw.SendCommand("SIZE file.bin")
+	require.NoError(t, err)
+	require.Equal(t, StatusActionNotTaken, rc, response)
+	require.Equal(t, "SIZE not allowed in ASCII mode", response)
+}
+
 func TestCOMBErrors(t *testing.T) {
 	s := NewTestServer(t, true)
 	conf := goftp.Config{
@@ -617,6 +759,8 @@ func TestCOMBErrors(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	rc, message, err := raw.SendCommand("COMB")
 	require.NoError(t, err)
@@ -684,4 +828,17 @@ func TestUnquoteCOMBParams(t *testing.T) {
 			require.Equal(t, p.parsed, parsed)
 		}
 	}
+}
+
+func getKnownHASHMappings() map[string]string {
+	knownHASHMapping := make(map[string]string)
+	knownHASHMapping["XCRC"] = "21b0f382"
+	knownHASHMapping["MD5"] = "6905e38270e1797e68f69026bfbef131"
+	knownHASHMapping["XMD5"] = "6905e38270e1797e68f69026bfbef131"
+	knownHASHMapping["XSHA"] = "0f11c4103a2573b14edd4733984729f2380d99ed"
+	knownHASHMapping["XSHA1"] = "0f11c4103a2573b14edd4733984729f2380d99ed"
+	knownHASHMapping["XSHA256"] = "ceee704dd96e2b8c2ceca59c4c697bc01123fb9e66a1a3ac34dbdd2d6da9659b"
+	knownHASHMapping["XSHA512"] = "4f95c20e4d030cbc43b1e139a0fe11c5e0e5e520cf3265bae852ae212b1c7cdb02c2fea5ba038cbf3202af8cdf313579fbe344d47919c288c16d6dd671e9db63" //nolint:lll
+
+	return knownHASHMapping
 }

@@ -56,6 +56,8 @@ func TestLoginSuccess(t *testing.T) {
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
 
+	defer func() { require.NoError(t, raw.Close()) }()
+
 	rc, _, err := raw.SendCommand("NOOP")
 	require.NoError(t, err)
 	require.Equal(t, StatusOK, rc, "Couldn't NOOP")
@@ -109,8 +111,33 @@ func TestAuthTLS(t *testing.T) {
 
 	defer func() { panicOnError(c.Close()) }()
 
-	_, err = c.OpenRawConn()
+	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't upgrade connection to TLS")
+
+	err = raw.Close()
+	require.NoError(t, err)
+}
+
+func TestAuthExplicitTLSFailure(t *testing.T) {
+	s := NewTestServer(t, true)
+
+	conf := goftp.Config{
+		User:     authUser,
+		Password: authPass,
+		TLSConfig: &tls.Config{
+			// nolint:gosec
+			InsecureSkipVerify: true,
+		},
+		TLSMode: goftp.TLSExplicit,
+	}
+
+	c, err := goftp.DialConfig(conf, s.Addr())
+	require.NoError(t, err, "Couldn't connect")
+
+	defer func() { panicOnError(c.Close()) }()
+
+	_, err = c.OpenRawConn()
+	require.Error(t, err, "Upgrade to TLS should fail, TLS is not configured server side")
 }
 
 func TestAuthTLSRequired(t *testing.T) {
@@ -145,6 +172,8 @@ func TestAuthTLSRequired(t *testing.T) {
 
 	raw, err := c.OpenRawConn()
 	require.NoError(t, err, "Couldn't open raw connection")
+
+	defer func() { require.NoError(t, raw.Close()) }()
 
 	rc, _, err := raw.SendCommand("STAT")
 	require.NoError(t, err)

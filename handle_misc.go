@@ -12,13 +12,13 @@ import (
 
 var errUnknowHash = errors.New("unknown hash algorithm")
 
-func (c *clientHandler) handleAUTH() error {
+func (c *clientHandler) handleAUTH(param string) error {
 	if tlsConfig, err := c.server.driver.GetTLSConfig(); err == nil {
 		c.writeMessage(StatusAuthAccepted, "AUTH command ok. Expecting TLS Negotiation.")
 		c.conn = tls.Server(c.conn, tlsConfig)
 		c.reader = bufio.NewReader(c.conn)
 		c.writer = bufio.NewWriter(c.conn)
-		c.controlTLS = true
+		c.setTLSForControl(true)
 	} else {
 		c.writeMessage(StatusActionNotTaken, fmt.Sprintf("Cannot get a TLS config: %v", err))
 	}
@@ -26,21 +26,21 @@ func (c *clientHandler) handleAUTH() error {
 	return nil
 }
 
-func (c *clientHandler) handlePROT() error {
+func (c *clientHandler) handlePROT(param string) error {
 	// P for Private, C for Clear
-	c.transferTLS = c.param == "P"
+	c.setTLSForTransfer(param == "P")
 	c.writeMessage(StatusOK, "OK")
 
 	return nil
 }
 
-func (c *clientHandler) handlePBSZ() error {
+func (c *clientHandler) handlePBSZ(param string) error {
 	c.writeMessage(StatusOK, "Whatever")
 
 	return nil
 }
 
-func (c *clientHandler) handleSYST() error {
+func (c *clientHandler) handleSYST(param string) error {
 	if c.server.settings.DisableSYST {
 		c.writeMessage(StatusCommandNotImplemented, "SYST is disabled")
 
@@ -52,23 +52,23 @@ func (c *clientHandler) handleSYST() error {
 	return nil
 }
 
-func (c *clientHandler) handleSTAT() error {
-	if c.param == "" { // Without a file, it's the server stat
+func (c *clientHandler) handleSTAT(param string) error {
+	if param == "" { // Without a file, it's the server stat
 		return c.handleSTATServer()
 	}
 
 	// With a file/dir it's the file or the dir's files stat
-	return c.handleSTATFile()
+	return c.handleSTATFile(param)
 }
 
-func (c *clientHandler) handleSITE() error {
+func (c *clientHandler) handleSITE(param string) error {
 	if c.server.settings.DisableSite {
 		c.writeMessage(StatusSyntaxErrorNotRecognised, "SITE support is disabled")
 
 		return nil
 	}
 
-	spl := strings.SplitN(c.param, " ", 2)
+	spl := strings.SplitN(param, " ", 2)
 	cmd := strings.ToUpper(spl[0])
 	var params string
 
@@ -97,15 +97,19 @@ func (c *clientHandler) handleSITE() error {
 }
 
 func (c *clientHandler) handleSTATServer() error {
+	// we need to hold the transfer lock here:
+	// server STAT is a special action command so we need to ensure
+	// to write the whole STAT response before sending a transfer
+	// open/close message
+	c.transferMu.Lock()
+	defer c.transferMu.Unlock()
+
 	if c.server.settings.DisableSTAT {
 		c.writeMessage(StatusCommandNotImplemented, "STAT is disabled")
 
 		return nil
 	}
 
-	// drakkan(2020-12-17): we don't handle STAT properly,
-	// we should return the status for all the transfers and we should allow
-	// stat while a transfer is in progress, see RFC 959
 	defer c.multilineAnswer(StatusSystemStatus, "Server status")()
 
 	duration := time.Now().UTC().Sub(c.connectedAt)
@@ -119,13 +123,18 @@ func (c *clientHandler) handleSTATServer() error {
 
 	c.writeLine(fmt.Sprintf("Logged in as %s", c.user))
 
+	if info := c.GetTranferInfo(); info != "" {
+		c.writeLine("Transfer connection open")
+		c.writeLine(info)
+	}
+
 	c.writeLine(c.server.settings.Banner)
 
 	return nil
 }
 
-func (c *clientHandler) handleOPTS() error {
-	args := strings.SplitN(c.param, " ", 2)
+func (c *clientHandler) handleOPTS(param string) error {
+	args := strings.SplitN(param, " ", 2)
 	if strings.EqualFold(args[0], "UTF8") {
 		c.writeMessage(StatusOK, "I'm in UTF8 only anyway")
 
@@ -165,20 +174,20 @@ func (c *clientHandler) handleOPTS() error {
 	return nil
 }
 
-func (c *clientHandler) handleNOOP() error {
+func (c *clientHandler) handleNOOP(param string) error {
 	c.writeMessage(StatusOK, "OK")
 
 	return nil
 }
 
-func (c *clientHandler) handleCLNT() error {
-	c.clnt = c.param
+func (c *clientHandler) handleCLNT(param string) error {
+	c.setClientVersion(param)
 	c.writeMessage(StatusOK, "Good to know")
 
 	return nil
 }
 
-func (c *clientHandler) handleFEAT() error {
+func (c *clientHandler) handleFEAT(param string) error {
 	c.writeLine(fmt.Sprintf("%d- These are my features", StatusSystemStatus))
 	defer c.writeMessage(StatusSystemStatus, "end")
 
@@ -188,6 +197,8 @@ func (c *clientHandler) handleFEAT() error {
 		"SIZE",
 		"MDTM",
 		"REST STREAM",
+		"EPRT",
+		"EPSV",
 	}
 
 	if !c.server.settings.DisableMLSD {
@@ -204,7 +215,7 @@ func (c *clientHandler) handleFEAT() error {
 
 	// This code made me think about adding this: https://github.com/stianstr/ftpserver/commit/387f2ba
 	if tlsConfig, err := c.server.driver.GetTLSConfig(); tlsConfig != nil && err == nil {
-		features = append(features, "AUTH TLS")
+		features = append(features, "AUTH TLS", "PBSZ", "PROT")
 	}
 
 	if c.server.settings.EnableHASH {
@@ -242,20 +253,23 @@ func (c *clientHandler) handleFEAT() error {
 	return nil
 }
 
-func (c *clientHandler) handleTYPE() error {
-	switch c.param {
-	case "I":
+func (c *clientHandler) handleTYPE(param string) error {
+	switch param {
+	case "I", "L8":
+		c.currentTransferType = TransferTypeBinary
 		c.writeMessage(StatusOK, "Type set to binary")
-	case "A":
-		c.writeMessage(StatusOK, "ASCII isn't properly supported: https://github.com/fclairamb/ftpserverlib/issues/86")
+	case "A", "L7":
+		c.currentTransferType = TransferTypeASCII
+		c.writeMessage(StatusOK, "Type set to ASCII")
 	default:
-		c.writeMessage(StatusSyntaxErrorNotRecognised, "Not understood")
+		c.writeMessage(StatusNotImplementedParam, "Unsupported transfer type")
 	}
 
 	return nil
 }
 
-func (c *clientHandler) handleQUIT() error {
+func (c *clientHandler) handleQUIT(param string) error {
+	c.transferWg.Wait()
 	c.writeMessage(StatusClosingControlConn, "Goodbye")
 	c.disconnect()
 	c.reader = nil
@@ -263,9 +277,41 @@ func (c *clientHandler) handleQUIT() error {
 	return nil
 }
 
-func (c *clientHandler) handleAVBL() error {
+func (c *clientHandler) handleABOR(param string) error {
+	c.transferMu.Lock()
+	defer c.transferMu.Unlock()
+
+	if c.transfer != nil {
+		isOpened := c.isTransferOpen
+
+		c.isTransferAborted = true
+
+		if err := c.closeTransfer(); err != nil {
+			c.logger.Warn(
+				"Problem aborting transfer for command", param,
+				"err", err,
+			)
+		}
+
+		if c.debug {
+			c.logger.Debug(
+				"Transfer aborted",
+				"command", param)
+		}
+
+		if isOpened {
+			c.writeMessage(StatusTransferAborted, "Connection closed; transfer aborted")
+		}
+	}
+
+	c.writeMessage(StatusClosingDataConn, "ABOR successful; closing transfer connection")
+
+	return nil
+}
+
+func (c *clientHandler) handleAVBL(param string) error {
 	if avbl, ok := c.driver.(ClientDriverExtensionAvailableSpace); ok {
-		path := c.absPath(c.param)
+		path := c.absPath(param)
 
 		info, err := c.driver.Stat(path)
 		if err != nil {

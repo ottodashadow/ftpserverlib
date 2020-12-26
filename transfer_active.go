@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-func (c *clientHandler) handlePORT() error {
+func (c *clientHandler) handlePORT(param string) error {
+	command := c.GetLastCommand()
+
 	if c.server.settings.DisableActiveMode {
-		c.writeMessage(StatusServiceNotAvailable, "PORT command is disabled")
+		c.writeMessage(StatusServiceNotAvailable, fmt.Sprintf("%v command is disabled", command))
 
 		return nil
 	}
@@ -22,21 +24,21 @@ func (c *clientHandler) handlePORT() error {
 	var err error
 	var raddr *net.TCPAddr
 
-	if c.command == "EPRT" {
-		raddr, err = parseEPRTAddr(c.param)
+	if command == "EPRT" {
+		raddr, err = parseEPRTAddr(param)
 	} else { // PORT
-		raddr, err = parsePORTAddr(c.param)
+		raddr, err = parsePORTAddr(param)
 	}
 
 	if err != nil {
-		c.writeMessage(StatusSyntaxErrorNotRecognised, fmt.Sprintf("Problem parsing %s: %v", c.command, err))
+		c.writeMessage(StatusSyntaxErrorNotRecognised, fmt.Sprintf("Problem parsing %s: %v", param, err))
 
 		return nil
 	}
 
 	var tlsConfig *tls.Config
 
-	if c.transferTLS || c.server.settings.TLSRequired == ImplicitEncryption {
+	if c.HasTLSForTransfers() || c.server.settings.TLSRequired == ImplicitEncryption {
 		tlsConfig, err = c.server.driver.GetTLSConfig()
 		if err != nil {
 			c.writeMessage(StatusServiceNotAvailable, fmt.Sprintf("Cannot get a TLS config for active connection: %v", err))
@@ -45,12 +47,17 @@ func (c *clientHandler) handlePORT() error {
 		}
 	}
 
-	c.writeMessage(StatusOK, c.command+" command successful")
+	c.transferMu.Lock()
+
 	c.transfer = &activeTransferHandler{
 		raddr:     raddr,
 		settings:  c.server.settings,
 		tlsConfig: tlsConfig,
 	}
+
+	c.transferMu.Unlock()
+
+	c.writeMessage(StatusOK, command+" command successful")
 
 	return nil
 }
@@ -61,6 +68,15 @@ type activeTransferHandler struct {
 	conn      net.Conn     // Connection used to connect to him
 	settings  *Settings    // Settings
 	tlsConfig *tls.Config  // not nil if the active connection requires TLS
+	info      string       // transfer info
+}
+
+func (a *activeTransferHandler) GetInfo() string {
+	return a.info
+}
+
+func (a *activeTransferHandler) SetInfo(info string) {
+	a.info = info
 }
 
 func (a *activeTransferHandler) Open() (net.Conn, error) {

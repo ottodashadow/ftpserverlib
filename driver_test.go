@@ -1,13 +1,18 @@
 package ftpserver
 
 import (
+	"bufio"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"github.com/stretchr/testify/require"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	gklog "github.com/go-kit/kit/log"
 	"github.com/spf13/afero"
@@ -302,3 +307,33 @@ B8waIgXRIjSWT4Fje7RTMT948qhguVhpoAgVzwzMqizzq6YIQbL7MHwXj7oZNUoQ
 CARLpnYLaeWP2nxQyzwGx5pn9TJwg79Yknr8PbSjeym1BSbE5C9ruqar4PfiIzYx
 di02m2YJAvRsG9VDpXogi+c=
 -----END PRIVATE KEY-----`)
+
+type lineClient struct {
+	conn net.Conn
+	rw   *bufio.ReadWriter
+	t    *testing.T
+}
+
+func NewLineClient(t *testing.T, addr string) *lineClient {
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+
+	return &lineClient{
+		t:    t,
+		conn: c,
+		rw:   bufio.NewReadWriter(bufio.NewReader(c), bufio.NewWriter(c)),
+	}
+}
+
+func (c *lineClient) WriteLine(line string) {
+	_, err := c.rw.WriteString(fmt.Sprintf("%s\r\n", line))
+	require.NoError(c.t, err)
+
+	require.NoError(c.t, c.rw.Flush())
+}
+
+func (c *lineClient) ReadLine() string {
+	bline, _, err := c.rw.ReadLine()
+	require.NoError(c.t, err)
+	return string(bline)
+}

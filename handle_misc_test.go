@@ -66,6 +66,16 @@ func TestIdleTimeout(t *testing.T) {
 	require.Equal(t, StatusServiceNotAvailable, rc)
 }
 
+func TestNoAuth(t *testing.T) {
+	s := NewTestServer(t, true)
+	c := NewLineClient(t, s.Addr())
+
+	require.True(t, strings.HasPrefix(c.ReadLine(), "220 "))
+
+	c.WriteLine("STAT")
+	require.True(t, strings.HasPrefix(c.ReadLine(), "200 "))
+}
+
 func TestStat(t *testing.T) {
 	s := NewTestServer(t, true)
 	conf := goftp.Config{

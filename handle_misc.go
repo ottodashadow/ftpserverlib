@@ -117,11 +117,7 @@ func (c *clientHandler) handleSTATServer() error {
 		duration,
 	))
 
-	if c.user != "" {
-		c.writeLine(fmt.Sprintf("Logged in as %s", c.user))
-	} else {
-		c.writeLine("Not logged in yet")
-	}
+	c.writeLine(fmt.Sprintf("Logged in as %s", c.user))
 
 	c.writeLine(c.server.settings.Banner)
 

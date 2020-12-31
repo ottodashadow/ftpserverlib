@@ -35,6 +35,10 @@ const (
 	TransferTypeBinary
 )
 
+const (
+	maxCommandSize = 4096
+)
+
 var (
 	errNoTransferConnection = errors.New("unable to open transfer: no transfer connection")
 	errTLSRequired          = errors.New("unable to open transfer: TLS is required")
@@ -100,7 +104,7 @@ func (server *FtpServer) newClientHandler(connection net.Conn, id uint32, transf
 		conn:                connection,
 		id:                  id,
 		writer:              bufio.NewWriter(connection),
-		reader:              bufio.NewReader(connection),
+		reader:              bufio.NewReaderSize(connection, maxCommandSize),
 		connectedAt:         time.Now().UTC(),
 		path:                "/",
 		selectedHashAlgo:    HASHAlgoSHA256,
@@ -280,6 +284,13 @@ func (c *clientHandler) end() {
 	c.server.driver.ClientDisconnected(c)
 	c.server.clientDeparture(c)
 
+	if err := c.conn.Close(); err != nil {
+		c.logger.Debug(
+			"Problem closing control connection",
+			"err", err,
+		)
+	}
+
 	c.transferMu.Lock()
 	defer c.transferMu.Unlock()
 
@@ -329,13 +340,24 @@ func (c *clientHandler) HandleCommands() {
 			}
 		}
 
-		line, err := c.reader.ReadString('\n')
+		lineSlice, isPrefix, err := c.reader.ReadLine()
+
+		if isPrefix {
+			if c.debug {
+				c.logger.Warn("Received line too long, disconnecting client",
+					"size", len(lineSlice))
+			}
+
+			return
+		}
 
 		if err != nil {
 			c.handleCommandsStreamError(err)
 
 			return
 		}
+
+		line := string(lineSlice)
 
 		if c.debug {
 			c.logger.Debug("Received line", "line", line)
@@ -362,10 +384,6 @@ func (c *clientHandler) handleCommandsStreamError(err error) {
 
 			if err := c.writer.Flush(); err != nil {
 				c.logger.Error("Flush error", "err", err)
-			}
-
-			if err := c.conn.Close(); err != nil {
-				c.logger.Error("Close error", "err", err)
 			}
 
 			break
@@ -593,7 +611,7 @@ func (c *clientHandler) TransferClose(err error) {
 }
 
 func parseLine(line string) (string, string) {
-	params := strings.SplitN(strings.Trim(line, "\r\n"), " ", 2)
+	params := strings.SplitN(line, " ", 2)
 	if len(params) == 1 {
 		return params[0], ""
 	}

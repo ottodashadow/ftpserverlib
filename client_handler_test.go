@@ -2,6 +2,7 @@ package ftpserver
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,40 @@ func TestConcurrency(t *testing.T) {
 	}
 
 	waitGroup.Wait()
+}
+
+func TestDOS(t *testing.T) {
+	s := NewTestServer(t, true)
+	conn, err := net.DialTimeout("tcp", s.Addr(), 5*time.Second)
+	require.NoError(t, err)
+
+	defer func() {
+		err = conn.Close()
+		require.NoError(t, err)
+	}()
+
+	buf := make([]byte, 128)
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+
+	response := string(buf[:n])
+	require.Equal(t, "220 TEST Server\r\n", response)
+
+	written := 0
+
+	for {
+		n, err = conn.Write([]byte("some text without line ending"))
+		written += n
+
+		if err != nil {
+			break
+		}
+
+		if written > 4096 {
+			s.Logger.Warn("test DOS",
+				"bytes written", written)
+		}
+	}
 }
 
 func TestLastCommand(t *testing.T) {
@@ -98,6 +133,35 @@ func TestTLSMethods(t *testing.T) {
 		require.True(t, cc.HasTLSForControl())
 		require.True(t, cc.HasTLSForTransfers())
 	})
+}
+
+func TestConnectionNotAllowed(t *testing.T) {
+	driver := &TestServerDriver{
+		Debug:          true,
+		CloseOnConnect: true,
+	}
+	s := NewTestServerWithDriver(t, driver)
+
+	conn, err := net.DialTimeout("tcp", s.Addr(), 5*time.Second)
+	require.NoError(t, err)
+
+	defer func() {
+		err = conn.Close()
+		require.NoError(t, err)
+	}()
+
+	buf := make([]byte, 128)
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+
+	response := string(buf[:n])
+	require.Equal(t, "500 TEST Server\r\n", response)
+
+	_, err = conn.Write([]byte("NOOP\r\n"))
+	require.NoError(t, err)
+
+	_, err = conn.Read(buf)
+	require.Error(t, err)
 }
 
 func TestCloseConnection(t *testing.T) {

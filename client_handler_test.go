@@ -1,6 +1,8 @@
 package ftpserver
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"net"
 	"sync"
@@ -338,4 +340,22 @@ func TestUnknownCommand(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusSyntaxErrorNotRecognised, rc)
 	require.Equal(t, fmt.Sprintf("Unknown command %#v", cmd), response)
+}
+
+type quotaExceededError struct{}
+
+func (q quotaExceededError) IsExceeded() bool {
+	return true
+}
+
+func (q quotaExceededError) Error() string {
+	return `quota exceeded`
+}
+
+func TestTransferCloseStorage(t *testing.T) {
+	buf := bytes.Buffer{}
+	h := clientHandler{writer: bufio.NewWriter(&buf)}
+	h.TransferClose(&quotaExceededError{})
+
+	require.Equal(t, "552 Issue during transfer: quota exceeded\r\n", buf.String())
 }

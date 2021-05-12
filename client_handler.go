@@ -38,6 +38,11 @@ const (
 	maxCommandSize = 4096
 )
 
+// StorageExceededError should be implemented by errors that should return 552 storage exceeded
+type StorageExceededError interface {
+	IsExceeded() bool
+}
+
 var (
 	errNoTransferConnection = errors.New("unable to open transfer: no transfer connection")
 	errTLSRequired          = errors.New("unable to open transfer: TLS is required")
@@ -605,7 +610,15 @@ func (c *clientHandler) TransferClose(err error) {
 	case errClose != nil:
 		c.writeMessage(StatusActionNotTaken, fmt.Sprintf("Issue during transfer close: %v", errClose))
 	case err != nil:
-		c.writeMessage(StatusActionNotTaken, fmt.Sprintf("Issue during transfer: %v", err))
+		code := StatusActionNotTaken
+
+		if storageErr, ok := err.(StorageExceededError); ok {
+			if storageErr.IsExceeded() {
+				code = StatusActionAborted
+			}
+		}
+
+		c.writeMessage(code, fmt.Sprintf("Issue during transfer: %v", err))
 	}
 }
 
